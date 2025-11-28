@@ -22,8 +22,8 @@ def load_vit_data(args, load_info=False, val_only=False):
             pixel_values = torch.cat([item['pixel_values'] for item in inputs], dim=0)
             return {'pixel_values': pixel_values}, torch.stack(labels)
 
-    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, collate_fn=vit_collate_fn)
-    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, collate_fn=vit_collate_fn)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True, collate_fn=vit_collate_fn, num_workers=12, pin_memory=True, prefetch_factor=2)
+    val_loader = DataLoader(val_set, batch_size=args.batch_size, shuffle=False, collate_fn=vit_collate_fn, num_workers=12, pin_memory=True, prefetch_factor=2)
 
     if val_only:
         return val_loader
@@ -32,7 +32,7 @@ def load_vit_data(args, load_info=False, val_only=False):
 
 def init_vit_model(args):
     print("[INFO]: Loading pre-trained ViT model")
-    model = ViTModel.from_pretrained(args.model_path)  # Use local model path
+    model = ViTModel.from_pretrained(args.model_path)  
     
     # Freeze or not parameters by fine_tune
     if args.fine_tune:

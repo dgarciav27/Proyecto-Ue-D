@@ -7,13 +7,13 @@ from transformers import ViTModel
 from vit_loaders import load_vit_data, init_vit_model
 import argparse
 from datetime import datetime
-
+from metrics_lora import compute_best_pr_and_f1
 # Arguments configuration
 parser = argparse.ArgumentParser()
-parser.add_argument('--data_root', default='/Brain/public/datasets/BioDCASE_task2/biodcase_development_set', type=str)
+parser.add_argument('--data_root', default='/SCRATCH/local/biodcase_development_set', type=str)
 parser.add_argument('--train_annot', type=str, required=True)
 parser.add_argument('--val_annot', type=str, required=True)
-parser.add_argument('--batch_size', default=16, type=int) #32
+parser.add_argument('--batch_size', default=32, type=int) #16 bench
 parser.add_argument('--n_classes', default=7, type=int, choices={3, 7, 10})
 parser.add_argument('--sample_rate', default=250, type=int) 
 parser.add_argument('--duration', default=15, type=int) #5
@@ -50,23 +50,35 @@ hidden_size = model.config.hidden_size
 num_classes = args.n_classes
 
 # ===== FUNCTION FOR VALIDATION =====
-def evaluate_model(model, dataloader, device):
+def evaluate_model_with_metrics(model, dataloader, device, labels):
     model.eval()
-    total_loss = 0
     criterion = nn.BCEWithLogitsLoss()
-    
+    total_loss = 0
+
+    all_preds = []
+    all_targets = []
+
     with torch.no_grad():
         for batch in dataloader:
-            inputs, labels = batch
+            inputs, labels_batch = batch
             pixel_values = inputs['pixel_values'].to(device)
-            labels = labels.to(device).float()
-            
+            labels_batch = labels_batch.to(device).float()
+
             outputs = model(pixel_values=pixel_values)
             logits = model.classifier(outputs.last_hidden_state[:, 0, :])
-            loss = criterion(logits, labels)
+            loss = criterion(logits, labels_batch)
             total_loss += loss.item()
+
+            all_preds.append(torch.sigmoid(logits).cpu())
+            all_targets.append(labels_batch.cpu())
+
+    y_hat = torch.cat(all_preds)
+    y_true = torch.cat(all_targets)
+
+    # Calcula mejores métricas
+    metrics = compute_best_pr_and_f1(y_true, y_hat, labels)
     
-    return total_loss / len(dataloader)
+    return total_loss / len(dataloader), metrics
 
 # -------Transfer learning-----------------
 print("=== TRANSFER LEARNING ===")
@@ -90,7 +102,7 @@ classification_head.to(device)
 for batch in tqdm(train_dataloader, desc="Transfer Learning", leave=False):
     inputs, labels = batch
     pixel_values = inputs['pixel_values'].to(device)
-    labels = labels.to(device).float()  # >>> CORREGIDO: añadir .float()
+    labels = labels.to(device).float() 
 
     optimizer.zero_grad()
 
@@ -166,7 +178,7 @@ for batch in tqdm(train_dataloader, desc="Fine-Tuning", leave=False):
 
 print("Fine-Tuning complete!")
 
-# -------Parameter-Efficient Fine-Tuning (PEFT) -- LoRA----------------
+# -------PEFT -- LoRA----------------
 print("=== LoRA TRAINING ===")
 from peft import LoraConfig, get_peft_model
 
@@ -183,7 +195,7 @@ config = LoraConfig(
 lora_model = get_peft_model(model, config)
 lora_model.classifier = nn.Linear(hidden_size, num_classes)
 
-# 4. TRAINING LOOP CON MEJOR MODELO
+# 4. TRAINING LOOP
 optimizer_lora = optim.AdamW(lora_model.parameters(), lr=1e-3)
 criterion = nn.BCEWithLogitsLoss()
 
@@ -212,8 +224,9 @@ for epoch in range(args.n_epochs):
         total_loss += loss.item()
     
     # Validation
-    val_loss = evaluate_model(lora_model, val_dataloader, device)
+    val_loss, val_metrics = evaluate_model_with_metrics(lora_model, val_dataloader, device, args.labels)
     print(f"Epoch {epoch+1} - Train Loss: {total_loss/len(train_dataloader):.4f}, Val Loss: {val_loss:.4f}")
+    print(f"-Metrics: Threshold {val_metrics['threshold']:.2f}, Precision {val_metrics['mean_best_prec']:.4f}, Recall {val_metrics['mean_best_recall']:.4f}, F1 {val_metrics['mean_best_f1']:.4f}")
     
     # SAVE BEST MODEL
     if val_loss < best_lora_loss:
